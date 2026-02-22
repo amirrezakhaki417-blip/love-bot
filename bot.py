@@ -2,35 +2,28 @@ import os
 import random
 import time
 from datetime import datetime
-from flask import Flask
-import threading
 
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+import pytz
+from telegram.ext import Updater, CommandHandler
 
 # ================== CONFIG ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set in Environment Variables")
+    raise RuntimeError("BOT_TOKEN is not set")
 
-# ================== KEEP ALIVE (Render) ==================
-
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot is running ✅"
-
-def run_web():
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+TIMEZONE = pytz.timezone("Asia/Tehran")
 
 # ================== MESSAGES ==================
+
+START_MESSAGE = (
+    "سلاممم 🫠❤️\n\n"
+    "من اینجام که\n"
+    "سرِ وقت،\n"
+    "یادت بندازم چقدر دوستت دارم ⏰🫀\n\n"
+    "لازم نیست کاری بکنی…\n"
+    "فقط باش 🤍"
+)
 
 MORNING_MESSAGE = "صبح ات بخیرر جون دلمم🥹🫠🐣👧🏻🫀💋😘"
 
@@ -48,53 +41,6 @@ ROUND_MESSAGES = [
     "بودنت آرامشه 🫶🌊",
 ]
 
-# ================== TIME LOGIC ==================
-
-def is_quiet_hours(now: datetime) -> bool:
-    # Quiet hours: 02:00 – 06:59
-    return 2 <= now.hour < 7
-
-def should_send_round(now: datetime) -> bool:
-    # Hour == Minute (e.g. 11:11, 22:22)
-    return now.hour == now.minute
-
-# ================== BOT TASK ==================
-
-async def scheduled_messages(app):
-    last_sent = set()
-
-    while True:
-        now = datetime.now()  # TZ is handled by Environment Variable
-
-        key = now.strftime("%Y-%m-%d %H:%M")
-
-        if key in last_sent:
-            time.sleep(5)
-            continue
-
-        # Quiet hours
-        if is_quiet_hours(now):
-            time.sleep(30)
-            continue
-
-        # 08:00 Morning
-        if now.hour == 8 and now.minute == 0:
-            await send_to_all(app, MORNING_MESSAGE)
-            last_sent.add(key)
-
-        # 23:30 Night
-        elif now.hour == 23 and now.minute == 30:
-            await send_to_all(app, NIGHT_MESSAGE)
-            last_sent.add(key)
-
-        # Round time
-        elif should_send_round(now):
-            msg = random.choice(ROUND_MESSAGES)
-            await send_to_all(app, msg)
-            last_sent.add(key)
-
-        time.sleep(20)
-
 # ================== USERS STORAGE ==================
 
 USERS_FILE = "users.txt"
@@ -105,46 +51,79 @@ def load_users():
     with open(USERS_FILE, "r") as f:
         return set(int(x.strip()) for x in f if x.strip())
 
-def save_user(user_id: int):
+def save_user(user_id):
     users = load_users()
     if user_id not in users:
         with open(USERS_FILE, "a") as f:
             f.write(f"{user_id}\n")
 
-async def send_to_all(app, text: str):
-    users = load_users()
-    for uid in users:
+def send_to_all(bot, text):
+    for uid in load_users():
         try:
-            await app.bot.send_message(chat_id=uid, text=text)
+            bot.send_message(chat_id=uid, text=text)
         except Exception:
             pass
 
+# ================== TIME LOGIC ==================
+
+def is_quiet_hours(now):
+    return 2 <= now.hour < 7
+
+def should_send_round(now):
+    return now.hour == now.minute
+
+# ================== SCHEDULER LOOP ==================
+
+def scheduler_loop(bot):
+    last_sent = set()
+
+    while True:
+        now = datetime.now(TIMEZONE)
+        key = now.strftime("%Y-%m-%d %H:%M")
+
+        if key in last_sent:
+            time.sleep(5)
+            continue
+
+        if is_quiet_hours(now):
+            time.sleep(30)
+            continue
+
+        if now.hour == 8 and now.minute == 0:
+            send_to_all(bot, MORNING_MESSAGE)
+            last_sent.add(key)
+
+        elif now.hour == 23 and now.minute == 30:
+            send_to_all(bot, NIGHT_MESSAGE)
+            last_sent.add(key)
+
+        elif should_send_round(now):
+            send_to_all(bot, random.choice(ROUND_MESSAGES))
+            last_sent.add(key)
+
+        time.sleep(20)
+
 # ================== COMMANDS ==================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start(update, context):
     user_id = update.effective_user.id
     save_user(user_id)
-    await update.message.reply_text("سلام 😌\nخوش اومدی 💖")
+    update.message.reply_text(START_MESSAGE)
 
 # ================== MAIN ==================
 
 def main():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-    application.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("start", start))
 
-    # Background scheduler
-    application.job_queue.run_once(
-        lambda ctx: ctx.application.create_task(
-            scheduled_messages(ctx.application)
-        ),
-        when=1,
-    )
+    updater.start_polling()
 
-    # Run Flask in another thread (keep alive)
-    threading.Thread(target=run_web, daemon=True).start()
+    # Start scheduler loop
+    scheduler_loop(updater.bot)
 
-    application.run_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
